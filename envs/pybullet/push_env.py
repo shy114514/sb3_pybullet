@@ -94,6 +94,32 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         # Target pose (set in reset)
         self.target_pos = np.zeros(3)
         self.target_yaw = 0.0
+        self.target_orn = np.array([0.0, 0.0, 0.0, 1.0])
+
+        # Reward state, matching OpenPush PushT.
+        self.alpha = getattr(self.cfg, "alpha", 5.0)
+        self.w_pos = getattr(self.cfg, "w_pos", 100.0)
+        self.w_pose = getattr(self.cfg, "w_pose", 100.0)
+        self.w_align = getattr(self.cfg, "w_align", 2.0)
+        self.gamma = getattr(self.cfg, "gamma", 0.001)
+        self.success_bonus = getattr(self.cfg, "successBonus", 100.0)
+        self.step_penalty = getattr(self.cfg, "stepPenalty", -0.1)
+        self.crash_penalty = getattr(self.cfg, "crashPenalty", -100.0)
+        self.crash_delta_thresh = getattr(self.cfg, "crashDeltaThresh", 0.1)
+        self.base_pos_thresh = getattr(self.cfg, "posThresh", 0.03)
+        self.pos_thresh = self.base_pos_thresh
+        self.pos_deadzone = getattr(self.cfg, "posDeadzone", 0.06)
+        self.base_ori_thresh = getattr(self.cfg, "oriThresh", 1.0)
+        self.ori_thresh = self.base_ori_thresh
+        self.actions = np.zeros(2, dtype=np.float32)
+        self.prev_ee_to_obj_dist = 0.0
+        self.prev_obj_to_tar_dist = 0.0
+        self.prev_ori_err = 0.0
+        self.prev_alignment_score = 0.0
+        self.prev_obj_pos = np.zeros(2, dtype=np.float32)
+        self.prev_obj_heading = 0.0
+        self.task_reward = 0.0
+        self.success_buf = False
 
         # Fixed end-effector orientation (pointing down)
         self.fixed_orientation = p.getQuaternionFromEuler([math.pi, 0, 0])
@@ -369,6 +395,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         target_base_orn = p.getQuaternionFromEuler([0, -np.pi/2, 0])
         target_yaw_orn = p.getQuaternionFromEuler([0, 0, target_yaw])
         target_orn = p.multiplyTransforms([0, 0, 0], target_yaw_orn, [0, 0, 0], target_base_orn)[1]
+        self.target_orn = np.array(target_orn, dtype=np.float32)
         
         p.resetBasePositionAndOrientation(self.targetId, self.target_pos, target_orn)
 
@@ -376,21 +403,29 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         for _ in range(20): p.stepSimulation()
         
         # Init Reward Vars
-        obj_pos = np.array(obj_pos[:2])
-        obj_euler = p.getEulerFromQuaternion(obj_orn)
-        obj_yaw = obj_euler[2]
-        target_pos = np.array(self.target_pos[:2])
-        target_yaw = self.target_yaw
+        obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
+        target_pos_3d, target_orn = p.getBasePositionAndOrientation(self.targetId)
+        obj_pos = np.array(obj_pos_3d[:2], dtype=np.float32)
+        target_pos = np.array(target_pos_3d[:2], dtype=np.float32)
         ee_pos = self.get_ee_position()[:2]
 
-        self.prev_dist_obj_target = np.linalg.norm(obj_pos - target_pos)
-        self.prev_dist_ee_obj = np.linalg.norm(ee_pos - obj_pos)
-        self.prev_yaw_error = abs(self._normalize_angle(target_yaw - obj_yaw))
+        self.actions[:] = 0.0
+        self.task_reward = 0.0
+        self.success_buf = False
+        self.prev_obj_pos = obj_pos.copy()
+        self.prev_obj_heading = self._object_heading_from_quat(obj_orn)
+        self.prev_ee_to_obj_dist = np.linalg.norm(ee_pos - obj_pos)
+        self.prev_obj_to_tar_dist = np.linalg.norm(target_pos - obj_pos)
+        self.prev_ori_err = self._quat_orientation_error(obj_orn, target_orn)
+        self.prev_alignment_score = self._alignment_score(obj_pos, ee_pos, target_pos)
 
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Execute one environment step."""
+        action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        self.actions[:] = action
+
         # Scale action
         dx, dy = action * 0.1
         dx = np.clip(dx, -1. - self.ee_pos[0], 1. - self.ee_pos[0])
@@ -415,9 +450,9 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
 
         self.step_count += 1
         
-        # Observation & Reward
-        obs = self._get_obs()
+        # Reward first, then observation history update, matching PushT.
         reward, terminated, truncated = self._compute_reward()
+        obs = self._get_obs()
         info = {}
         info['is_success'] = terminated
 
@@ -425,19 +460,46 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
     
     def set_difficulty(self, difficulty: int):
         self.difficulty = difficulty
-        self.distance_threshold = self.cfg.success_threshold * (0.92)**self.difficulty
-        self.orientation_threshold = self.cfg.orientation_threshold * (3/4)**self.difficulty
+        self.pos_thresh = self.base_pos_thresh * (0.97 ** self.difficulty)
+        self.ori_thresh = self.base_ori_thresh * (0.97 ** self.difficulty)
+        self.distance_threshold = self.pos_thresh
+        self.orientation_threshold = self.ori_thresh
 
     def _angle_normalize(self, angle):
         """将角度归一化到 [-pi, pi]"""
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
+    def _quat_orientation_error(self, obj_quat, target_quat) -> float:
+        dot_product = float(np.dot(np.asarray(obj_quat), np.asarray(target_quat)))
+        abs_dot = np.clip(abs(dot_product), 0.0, 1.0 - 1e-6)
+        return 2.0 * math.acos(abs_dot)
+
+    def _alignment_score(self, obj_pos: np.ndarray, ee_pos: np.ndarray, target_pos: np.ndarray) -> float:
+        vec_o_to_ee = ee_pos - obj_pos
+        vec_t_to_o = obj_pos - target_pos
+        ee_to_obj_dist = np.linalg.norm(vec_o_to_ee)
+        obj_to_tar_dist = np.linalg.norm(vec_t_to_o)
+        dir_t_to_o = vec_t_to_o / (obj_to_tar_dist + 1e-6)
+        dir_o_to_ee = vec_o_to_ee / (ee_to_obj_dist + 1e-6)
+        cos_sim = np.dot(dir_t_to_o, dir_o_to_ee)
+        return (cos_sim + 1.0) / 2.0
+
+    def _object_heading_from_quat(self, obj_quat) -> float:
+        rot_matrix = p.getMatrixFromQuaternion(obj_quat)
+        return math.atan2(rot_matrix[5], rot_matrix[2])
+
+    def _update_observation_history(self, obj_pos: np.ndarray, obj_orn) -> None:
+        self.prev_obj_pos = obj_pos.copy()
+        self.prev_obj_heading = self._object_heading_from_quat(obj_orn)
+
     def _get_obs(self) -> np.ndarray:
         """Get current observation."""
         if self.obs_type == "image":
-            return self._get_image_obs()
-        else:
-            return self._get_state_obs()
+            obs = self._get_image_obs()
+            obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
+            self._update_observation_history(np.array(obj_pos_3d[:2], dtype=np.float32), obj_orn)
+            return obs
+        return self._get_state_obs()
 
     def _get_state_obs(self) -> np.ndarray:
         """Get 19D state observation."""
@@ -484,6 +546,8 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
             [obj_angular_vel]
         ))
 
+        self._update_observation_history(obj_pos, obj_orn)
+
         return obs.astype(np.float32)
 
     def _get_image_obs(self) -> np.ndarray:
@@ -501,82 +565,53 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         return rgb
 
     def _compute_reward(self) -> Tuple[float, bool, bool]:
-        """Compute reward, terminated, truncated."""
-        # Get positions
-        obj_pos, obj_orn = p.getBasePositionAndOrientation(self.objectId)
-        obj_pos = np.array(obj_pos[:2])
-        obj_euler = p.getEulerFromQuaternion(obj_orn)
-        obj_yaw = obj_euler[2]
-
-        target_pos = np.array(self.target_pos[:2])
-        target_yaw = self.target_yaw
-
+        """Compute reward, terminated, truncated using the OpenPush PushT formula."""
+        obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
+        target_pos_3d, target_orn = p.getBasePositionAndOrientation(self.targetId)
+        obj_pos = np.array(obj_pos_3d[:2], dtype=np.float32)
+        target_pos = np.array(target_pos_3d[:2], dtype=np.float32)
         ee_pos = self.get_ee_position()[:2]
 
-        # Distances and errors
-        dist_obj_target = np.linalg.norm(obj_pos - target_pos)
-        dist_ee_obj = np.linalg.norm(ee_pos - obj_pos)
-        yaw_error = abs(self._normalize_angle(target_yaw - obj_yaw))
+        vec_o_to_ee = ee_pos - obj_pos
+        vec_t_to_o = obj_pos - target_pos
+        curr_ee_to_obj_dist = np.linalg.norm(vec_o_to_ee)
+        curr_obj_to_tar_dist = np.linalg.norm(vec_t_to_o)
+        curr_ori_err = self._quat_orientation_error(obj_orn, target_orn)
 
-        # Incremental changes
-        delta_dist_target = self.prev_dist_obj_target - dist_obj_target
-        delta_dist_ee_obj = self.prev_dist_ee_obj - dist_ee_obj
-        delta_yaw_error = self.prev_yaw_error - yaw_error
+        dir_t_to_o = vec_t_to_o / (curr_obj_to_tar_dist + 1e-6)
+        dir_o_to_ee = vec_o_to_ee / (curr_ee_to_obj_dist + 1e-6)
+        cos_sim = np.dot(dir_t_to_o, dir_o_to_ee)
+        curr_alignment_score = (cos_sim + 1.0) / 2.0
+        alignment_decay = np.clip(curr_obj_to_tar_dist / (self.pos_thresh * 1.0) - 0.9, 0.0, 1.0)
+        alignment_reward = self.w_align * (curr_alignment_score - self.prev_alignment_score) * alignment_decay
 
-        # Update previous values
-        self.prev_dist_obj_target = dist_obj_target
-        self.prev_dist_ee_obj = dist_ee_obj
-        self.prev_yaw_error = yaw_error
+        approach_reward = self.alpha * (self.prev_ee_to_obj_dist - curr_ee_to_obj_dist)
+        pos_reward = self.w_pos * (self.prev_obj_to_tar_dist - curr_obj_to_tar_dist)
+        ori_reward = self.w_pose * (self.prev_ori_err - curr_ori_err)
 
-        # Reward components
-        reward = self.cfg.step_penalty
+        action_penalty = -self.gamma * np.sum(self.actions ** 2)
+        step_penalty = self.step_penalty
+        obj_planar_delta = np.linalg.norm(obj_pos - self.prev_obj_pos)
+        crash_penalty = self.crash_penalty if obj_planar_delta > self.crash_delta_thresh else 0.0
 
-        # Distance penalty
-        reward += - self.cfg.distance_coef * np.tanh(dist_ee_obj)
+        self.success_buf = self.success_buf or (
+            curr_obj_to_tar_dist < self.pos_thresh and curr_ori_err < self.ori_thresh
+        )
+        success_bonus_term = float(self.success_buf) * self.success_bonus
 
-        # Position progress
-        reward += delta_dist_target * self.cfg.position_progress_coef
+        task_reward = approach_reward + pos_reward + ori_reward + alignment_reward
+        reward = task_reward + action_penalty + step_penalty + crash_penalty + success_bonus_term
+        self.task_reward += task_reward
 
-        # Orientation progress
-        reward += delta_yaw_error * self.cfg.orientation_progress_coef
+        self.prev_ee_to_obj_dist = curr_ee_to_obj_dist
+        self.prev_obj_to_tar_dist = curr_obj_to_tar_dist
+        self.prev_ori_err = curr_ori_err
+        self.prev_alignment_score = curr_alignment_score
 
-        # Coupling bonus
-        if delta_dist_target > 0 and delta_yaw_error > 0:
-            coupling = min(delta_dist_target * 10, delta_yaw_error) * self.cfg.coupling_coef
-            reward += coupling
-
-        # Alignment reward
-        vec_ee_to_obj = obj_pos - ee_pos
-        vec_obj_to_target = target_pos - obj_pos
-        norm_ee_obj = np.linalg.norm(vec_ee_to_obj)
-        norm_obj_target = np.linalg.norm(vec_obj_to_target)
-
-        if norm_ee_obj > 0.01 and norm_obj_target > 0.01:
-            alignment = np.dot(vec_ee_to_obj, vec_obj_to_target) / (norm_ee_obj * norm_obj_target)
-            if dist_ee_obj < self.cfg.contact_threshold * 2:
-                reward += alignment * self.cfg.alignment_coef
-
-        # EE approach reward
-        if dist_ee_obj > self.cfg.contact_threshold:
-            reward += delta_dist_ee_obj * self.cfg.ee_approach_coef
-        else:
-            if delta_dist_target > 0:
-                reward += self.cfg.contact_reward * 2.0
-            else:
-                reward += self.cfg.contact_reward * 0.5
-
-        # Success check
-        terminated = False
-        position_success = dist_obj_target < self.distance_threshold
-        orientation_success = yaw_error < self.orientation_threshold
-
-        if position_success and orientation_success:
-            reward += self.cfg.success_bonus
-            terminated = True
-
+        terminated = bool(self.success_buf)
         truncated = (not terminated) and (self.step_count >= self.cfg.max_episode_steps)
 
-        return reward, terminated, truncated
+        return float(reward), terminated, truncated
 
     def _normalize_angle(self, angle: float) -> float:
         """Normalize angle to [-pi, pi]."""

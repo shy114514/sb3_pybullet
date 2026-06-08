@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=20,
                         help="Number of episodes to evaluate")
     parser.add_argument("--obs-type", type=str, default="state",
-                        choices=["state", "image"],
+                        choices=["state"],
                         help="Observation type")
 
     # Output options
@@ -180,8 +180,7 @@ def create_eval_env(args, cfg, vecnorm_path=None):
     if not hasattr(env, 'num_envs'):
         env = DummyVecEnv([lambda: env])
 
-    # Load VecNormalize for state mode
-    if args.obs_type == "state" and vecnorm_path:
+    if vecnorm_path:
         print(f"Loading VecNormalize: {vecnorm_path}")
         env = VecNormalize.load(vecnorm_path, env)
         env.training = False

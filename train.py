@@ -47,17 +47,16 @@ def parse_args():
                         choices=["pybullet", "pybullet_wm"],
                         help="Environment backend")
 
-    # Observation type
     parser.add_argument("--obs-type", type=str, default="state",
-                        choices=["state", "image"],
-                        help="Observation type: 'state' or 'image'")
+                        choices=["state"],
+                        help="Observation type")
 
     # Training parameters
     parser.add_argument("--timesteps", type=int, default=1000000,
                         help="Total training timesteps")
     parser.add_argument("--n-envs", type=int, default=16,
                         help="Number of parallel environments")
-    parser.add_argument("--device", type=str, default="cuda",
+    parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "cuda"],
                         help="")
 
@@ -530,12 +529,11 @@ def create_env(args, cfg, vecnorm_path=None):
         render_mode="human" if args.test else None,
     )
 
-    if args.obs_type == "state":
-        if vecnorm_path and os.path.exists(vecnorm_path):
-            print(f"Loading VecNormalize stats from {vecnorm_path}")
-            env = VecNormalize.load(vecnorm_path, env.venv if hasattr(env, 'venv') else env)
-            env.training = True
-            env.norm_reward = False
+    if vecnorm_path and os.path.exists(vecnorm_path):
+        print(f"Loading VecNormalize stats from {vecnorm_path}")
+        env = VecNormalize.load(vecnorm_path, env.venv if hasattr(env, 'venv') else env)
+        env.training = True
+        env.norm_reward = False
 
     return env
 
@@ -555,8 +553,7 @@ def create_eval_env(args, cfg):
     if not hasattr(env, "num_envs"):
         env = DummyVecEnv([lambda: env])
 
-    if args.obs_type == "state":
-        env = VecNormalize(env, training=False, norm_reward=False)
+    env = VecNormalize(env, training=False, norm_reward=False)
 
     return env
 
@@ -584,7 +581,7 @@ def create_callbacks(args, cfg, config, env, n_envs):
         )
         callbacks.append(checkpoint_callback)
 
-        if args.obs_type == "state" and isinstance(env, VecNormalize):
+        if isinstance(env, VecNormalize):
             norm_callback = SaveVecNormalizeCallback(
                 save_freq=max(args.save_freq // n_envs, 1),
                 save_path=checkpoint_path,
@@ -641,28 +638,25 @@ def get_training_config(args, config_path: str):
     }
 
     common_ppo_defaults = {
-        "learning_rate": 0.0001 if args.obs_type == "state" else 0.0003,
+        "learning_rate": 0.0001,
         "n_steps": 2048,
-        "batch_size": 256 if args.obs_type == "state" else 64,
+        "batch_size": 256,
         "n_epochs": 10,
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
-        "ent_coef": 0.01 if args.obs_type == "state" else 0.0,
+        "ent_coef": 0.01,
     }
     ppo_kwargs = {
         key: obs_training_config.get(key, default)
         for key, default in common_ppo_defaults.items()
     }
 
-    if args.obs_type == "image":
-        config["policy_type"] = "CnnPolicy"
-    else:
-        config["policy_type"] = "MlpPolicy"
-        ppo_kwargs["policy_kwargs"] = dict(net_arch=dict(
-            pi=obs_training_config.get("net_arch_pi", [256, 256, 128]),
-            vf=obs_training_config.get("net_arch_vf", [256, 256, 128]),
-        ))
+    config["policy_type"] = "MlpPolicy"
+    ppo_kwargs["policy_kwargs"] = dict(net_arch=dict(
+        pi=obs_training_config.get("net_arch_pi", [256, 256, 128]),
+        vf=obs_training_config.get("net_arch_vf", [256, 256, 128]),
+    ))
 
     config["ppo_kwargs"] = ppo_kwargs
 
@@ -748,7 +742,7 @@ def train(args):
     print(f"Model saved: {config['model_save_path']}")
 
     # Save VecNormalize stats
-    if args.obs_type == "state" and isinstance(env, VecNormalize):
+    if isinstance(env, VecNormalize):
         env.save(config["model_save_path"] + "_vecnormalize.pkl")
         print(f"VecNormalize saved: {config['model_save_path']}_vecnormalize.pkl")
 

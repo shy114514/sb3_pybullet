@@ -28,7 +28,7 @@ def make_env(
         backend: Backend to use ("pybullet" or "pybullet_wm").
         cfg: Environment configuration. If None, uses default config.
         render_mode: Render mode ("human", "rgb_array", or None).
-        obs_type: Observation type ("state" or "image").
+        obs_type: Observation type. Only "state" is supported.
         num_envs: Accepted for API compatibility; PyBullet creates one env here.
         device: Device for world-model inference ("cpu" or "cuda").
         max_episode_steps: Override max episode steps from config.
@@ -88,7 +88,7 @@ def make_vec_env(
         backend: Backend to use ("pybullet" or "pybullet_wm").
         cfg: Environment configuration. If None, uses default config.
         n_envs: Number of parallel environments.
-        obs_type: Observation type ("state" or "image").
+        obs_type: Observation type. Only "state" is supported.
         device: Device for world-model inference ("cpu" or "cuda").
         vec_env_cls: VecEnv class to use (default: SubprocVecEnv).
         max_episode_steps: Override max episode steps from config.
@@ -113,8 +113,6 @@ def make_vec_env(
     if backend not in env_cls_by_backend:
         raise ValueError(f"Unknown backend: {backend}")
 
-    if backend == "pybullet":
-        device = "cpu"
     if vec_env_cls is None:
         vec_env_cls = SubprocVecEnv
 
@@ -136,8 +134,7 @@ def make_vec_env(
         monitor_kwargs={"info_keywords": ("is_success",)},
     )
 
-    if obs_type == "state":
-        env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=0.99)
+    env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=0.99)
 
     return env
 

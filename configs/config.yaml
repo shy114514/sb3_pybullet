@@ -58,17 +58,6 @@ training:
     net_arch_pi: [256, 256, 128]
     net_arch_vf: [256, 256, 128]
 
-  # PPO hyperparameters (image mode)
-  image:
-    learning_rate: 0.0003
-    n_steps: 2048
-    batch_size: 64
-    n_epochs: 10
-    gamma: 0.99
-    gae_lambda: 0.95
-    clip_range: 0.2
-    ent_coef: 0.0
-
   # General training settings
   default_timesteps: 1000000
   default_n_envs: 12

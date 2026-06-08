@@ -284,6 +284,9 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
 
     def step(self, action: np.ndarray):
         """Execute one environment step using PINNs world-model transition."""
+        action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        self.actions[:] = action
+
         dx, dy = action * 0.1
         dx = np.clip(dx, -1.0 - self.ee_pos[0], 1.0 - self.ee_pos[0])
         dy = np.clip(dy, -1.0 - self.ee_pos[1], 1.0 - self.ee_pos[1])
@@ -341,8 +344,8 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
 
         self.step_count += 1
 
-        obs = self._get_obs()
         reward, terminated, truncated = self._compute_reward()
+        obs = self._get_obs()
         info = {"is_success": terminated}
 
         return obs, reward, terminated, truncated, info

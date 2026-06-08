@@ -134,7 +134,7 @@ class BasePushEnv(ABC):
 
     The environment implements a robot arm pushing task:
     - Robot must push a rectangular object to a target position and orientation
-    - Observation space: 19D state vector (or 84x84 RGB image)
+    - Observation space: 19D state vector
     - Action space: 2D continuous end-effector delta (dx, dy)
 
     Observation features (state mode, 19D):
@@ -167,7 +167,7 @@ class BasePushEnv(ABC):
         Args:
             cfg: Environment configuration.
             render_mode: Render mode ("human", "rgb_array", or None).
-            obs_type: Observation type ("state" or "image").
+            obs_type: Observation type. Only "state" is supported.
             num_envs: Number of parallel environments requested by wrappers.
             device: Device to use ("cpu" or "cuda").
         """
