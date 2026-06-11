@@ -1,10 +1,10 @@
 """Environment factory for PyBullet push-task environments."""
 
+from types import SimpleNamespace
 from typing import Any, List, Optional
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
 
-from .base import BasePushEnvConfig
 from .pybullet import PyBulletPushEnv, WMPyBulletPushEnv
 
 
@@ -15,7 +15,7 @@ def get_available_backends() -> List[str]:
 
 def make_env(
     backend: str = "pybullet",
-    cfg: Optional[BasePushEnvConfig] = None,
+    cfg: Optional[Any] = None,
     render_mode: Optional[str] = None,
     obs_type: str = "state",
     num_envs: int = 1,
@@ -26,7 +26,7 @@ def make_env(
 
     Args:
         backend: Backend to use ("pybullet" or "pybullet_wm").
-        cfg: Environment configuration. If None, uses default config.
+        cfg: Environment configuration loaded from YAML.
         render_mode: Render mode ("human", "rgb_array", or None).
         obs_type: Observation type. Only "state" is supported.
         num_envs: Accepted for API compatibility; PyBullet creates one env here.
@@ -37,7 +37,7 @@ def make_env(
         Gymnasium-compatible environment.
 
     Raises:
-        ValueError: If backend is not available.
+        ValueError: If backend is not available or cfg is missing.
     """
     available = get_available_backends()
     if backend not in available:
@@ -47,7 +47,7 @@ def make_env(
         )
 
     if cfg is None:
-        cfg = BasePushEnvConfig()
+        raise ValueError("cfg is required; load it with load_config_from_yaml() and pass it explicitly.")
 
     if max_episode_steps is not None:
         cfg.max_episode_steps = max_episode_steps
@@ -74,7 +74,7 @@ def make_env(
 
 def make_vec_env(
     backend: str = "pybullet",
-    cfg: Optional[BasePushEnvConfig] = None,
+    cfg: Optional[Any] = None,
     n_envs: int = 12,
     obs_type: str = "state",
     device: str = "cpu",
@@ -86,7 +86,7 @@ def make_vec_env(
 
     Args:
         backend: Backend to use ("pybullet" or "pybullet_wm").
-        cfg: Environment configuration. If None, uses default config.
+        cfg: Environment configuration loaded from YAML.
         n_envs: Number of parallel environments.
         obs_type: Observation type. Only "state" is supported.
         device: Device for world-model inference ("cpu" or "cuda").
@@ -101,7 +101,7 @@ def make_vec_env(
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
     if cfg is None:
-        cfg = BasePushEnvConfig()
+        raise ValueError("cfg is required; load it with load_config_from_yaml() and pass it explicitly.")
 
     if max_episode_steps is not None:
         cfg.max_episode_steps = max_episode_steps
@@ -139,18 +139,22 @@ def make_vec_env(
     return env
 
 
-def load_config_from_yaml(yaml_path: str) -> BasePushEnvConfig:
+def load_config_from_yaml(yaml_path: str) -> SimpleNamespace:
     """Load environment configuration from YAML file.
 
     Args:
         yaml_path: Path to YAML configuration file.
 
     Returns:
-        BasePushEnvConfig loaded from the file.
+        SimpleNamespace with env and reward YAML keys exposed as attributes.
     """
     import yaml
 
     with open(yaml_path, 'r', encoding="utf-8") as f:
         config_dict = yaml.safe_load(f)
 
-    return BasePushEnvConfig.from_dict(config_dict)
+    cfg = {}
+    for section_name in ("env", "reward"):
+        cfg.update(config_dict[section_name])
+
+    return SimpleNamespace(**cfg)

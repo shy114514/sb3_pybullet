@@ -2,7 +2,7 @@
 PyBullet implementation of the push task environment.
 
 This module implements the push task using PyBullet physics engine.
-It supports both state-based and image-based observations.
+It uses state-based observations.
 """
 
 import gymnasium as gym
@@ -13,10 +13,10 @@ import numpy as np
 import math
 import os
 import time
-from typing import Dict, Optional, Tuple, Any
+from typing import Any, Dict, Optional, Tuple
 from collections import namedtuple
 
-from ..base import BasePushEnv, BasePushEnvConfig
+from ..base import BasePushEnv
 
 
 class PyBulletPushEnv(BasePushEnv, gym.Env):
@@ -33,7 +33,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
 
     def __init__(
         self,
-        cfg: BasePushEnvConfig,
+        cfg: Any,
         render_mode: Optional[str] = None,
         obs_type: str = "state",
         num_envs: int = 1,
@@ -44,50 +44,46 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         Args:
             cfg: Environment configuration.
             render_mode: "human" for GUI, "rgb_array" for rendering, None for headless.
-            obs_type: "state" for 19D vector, "image" for 84x84 RGB.
+            obs_type: Only "state" is supported.
             num_envs: Ignored for PyBullet (always 1).
             device: Ignored for PyBullet (always CPU).
         """
         super().__init__(cfg, render_mode, obs_type, num_envs=1, device=device)
 
+        if self.obs_type != "state":
+            raise ValueError("PyBulletPushEnv only supports state observations.")
 
         self.difficulty = 0
         self.distance_threshold = self.cfg.success_threshold
         self.orientation_threshold = self.cfg.orientation_threshold
         self.asset_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets"))
         self.fixed_ee_z = self.cfg.fixed_ee_z
-        # Ranges
-        self.object_r_range = self.cfg.object_r_range
-        self.object_theta_range = self.cfg.object_theta_range
-        self.target_r_range = self.cfg.target_r_range
-        self.target_theta_range = self.cfg.target_theta_range
+        # PushT-style action and reset settings.
+        self.step_size = self.cfg.step_size
+        self.control_freq_inv = self.cfg.control_freq_inv
+        self.obj_x_range = self.cfg.obj_x_range
+        self.obj_y_range = self.cfg.obj_y_range
+        self.target_x_range = self.cfg.target_x_range
+        self.target_y_range = self.cfg.target_y_range
+        self.t_block_base_z = 0.014
 
         # Define spaces
         self._action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
 
-        self.img_width = 84
-        self.img_height = 84
-        if self.obs_type == "image":
-            self._observation_space = spaces.Box(
-                low=0, high=255,
-                shape=(self.img_height, self.img_width, 3),
-                dtype=np.uint8
-            )
-        else:
-            # 19D state observation
-            self._observation_space = spaces.Box(
-                low=-np.inf, high=np.inf,
-                shape=(19,),
-                dtype=np.float32
-            )
+        self._observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(13,),
+            dtype=np.float32,
+        )
 
 
         # Connect to PyBullet
         self.phisics_client = p.connect(p.GUI if render_mode == "human" else p.DIRECT)
         p.setGravity(0, 0, -9.8)
         self.dt = 1.0 / 240.0  # Internal physics step
-        self.frame_skip = 24   # Control step: 240Hz / 20 = 12Hz
         p.setTimeStep(self.dt)
+        self.smootherstep_alphas = self._make_smootherstep_alphas(self.control_freq_inv)
 
         self.step_count = 0
 
@@ -96,7 +92,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self.target_yaw = 0.0
         self.target_orn = np.array([0.0, 0.0, 0.0, 1.0])
 
-        # Reward state, matching OpenPush PushT.
+        # Reward state for the PushT-style task.
         self.alpha = getattr(self.cfg, "alpha", 5.0)
         self.w_pos = getattr(self.cfg, "w_pos", 100.0)
         self.w_pose = getattr(self.cfg, "w_pose", 100.0)
@@ -112,6 +108,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self.base_ori_thresh = getattr(self.cfg, "oriThresh", 1.0)
         self.ori_thresh = self.base_ori_thresh
         self.actions = np.zeros(2, dtype=np.float32)
+        self.prev_action_world = np.zeros(2, dtype=np.float32)
         self.prev_ee_to_obj_dist = 0.0
         self.prev_obj_to_tar_dist = 0.0
         self.prev_ori_err = 0.0
@@ -124,10 +121,15 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         # Fixed end-effector orientation (pointing down)
         self.fixed_orientation = p.getQuaternionFromEuler([math.pi, 0, 0])
 
-        # Camera matrices for image observation
+        # Camera matrices for rendering and video recording.
         self._load_static_resources()
         self._create_dynamic_actors()
         self._setup_cameras()
+
+    def _make_smootherstep_alphas(self, steps: int) -> np.ndarray:
+        t = np.linspace(1.0 / steps, 1.0, steps, dtype=np.float32)
+        alphas = t * t * t * (10.0 + t * (-15.0 + 6.0 * t))
+        return np.diff(alphas, prepend=np.float32(0.0)).astype(np.float32)
 
     def _load_static_resources(self):
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -235,30 +237,52 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
             childFramePosition=self.ee_pos # 初始目标位置
         )
 
-        # 物体尺寸：长0.1，宽0.066 高0.026，原点位于中心
-        obj_center2mass_center = [0, 0, -0.02]
-        shift = obj_center2mass_center
         p.setAdditionalSearchPath(self.asset_dir)
-        obj_col = p.createCollisionShape(p.GEOM_MESH, fileName="object.obj", collisionFramePosition=shift)
-        obj_vis = p.createVisualShape(p.GEOM_MESH, fileName="object.obj", rgbaColor=[0.8, 0.2, 0.2, 1], visualFramePosition=shift)
-        self.objectId = p.createMultiBody(
-            baseMass=0.5,
-            baseCollisionShapeIndex=obj_col,
-            baseVisualShapeIndex=obj_vis,
-            basePosition=[0, 0, 0.025],
-            baseOrientation=p.getQuaternionFromEuler([0, 0, 0])
+        t_block_mesh_path = os.path.join(self.asset_dir, "object.obj")
+        object_col = p.createCollisionShape(
+            shapeType=p.GEOM_MESH,
+            fileName=t_block_mesh_path,
         )
+        object_vis = p.createVisualShape(
+            shapeType=p.GEOM_MESH,
+            fileName=t_block_mesh_path,
+            rgbaColor=[0.8, 0.2, 0.2, 1.0],
+        )
+        self.objectId = p.createMultiBody(
+            baseMass=0.3,
+            baseCollisionShapeIndex=object_col,
+            baseVisualShapeIndex=object_vis,
+            basePosition=[0, 0, self.t_block_base_z],
+            baseOrientation=self._t_block_orientation(0.0),
+        )
+        # self.objectId = p.loadURDF(
+        #     "t_block.urdf",
+        #     basePosition=[0, 0, self.t_block_base_z],
+        #     baseOrientation=self._t_block_orientation(0.0),
+        #     flags=p.URDF_USE_INERTIA_FROM_FILE,
+        #     useFixedBase=False,
+        # )
         p.changeDynamics(self.objectId, -1, lateralFriction=0.6, spinningFriction=0.01)
 
-        target_col = -1  # No collision for target
-        target_vis = p.createVisualShape(p.GEOM_MESH, fileName="object.obj", rgbaColor=[0, 1, 0, 0.3])
-        self.targetId = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=target_col,
-            baseVisualShapeIndex=target_vis,
-            basePosition=[0, 0, 0],
-            baseOrientation=p.getQuaternionFromEuler([0, 0, 0])
+        target_vis = p.createVisualShape(
+            shapeType=p.GEOM_MESH,
+            fileName=t_block_mesh_path,
+            rgbaColor=[0.0, 1.0, 0.0, 0.5],
         )
+        self.targetId = p.createMultiBody(
+            baseMass=0.0,
+            baseCollisionShapeIndex=-1,
+            baseVisualShapeIndex=target_vis,
+            basePosition=[0, 0, self.t_block_base_z],
+            baseOrientation=self._t_block_orientation(0.0),
+        )
+        # self.targetId = p.loadURDF(
+        #     "t_block_vision.urdf",
+        #     basePosition=[0, 0, self.t_block_base_z],
+        #     baseOrientation=self._t_block_orientation(0.0),
+        #     flags=p.URDF_USE_INERTIA_FROM_FILE,
+        #     useFixedBase=True,
+        # )
 
         # # --- 尺寸定义 (与原代码一致) ---
         # base_half_extents = [0.1, 0.025, 0.025]  # 横杠
@@ -322,20 +346,6 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
 
     def _setup_cameras(self):
         """Set up camera matrices for rendering."""
-        # Top-down view for image observation
-        self.view_matrix = p.computeViewMatrix(
-            cameraEyePosition=[0.5, 0, 2.0],
-            cameraTargetPosition=[0.5, 0, 0],
-            cameraUpVector=[1, 0, 0]
-        )
-        self.proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60,
-            aspect=float(self.img_width) / self.img_height,
-            nearVal=0.1,
-            farVal=100.0
-        )
-
-        # Global camera for video recording
         self.global_view_matrix = p.computeViewMatrix(
             cameraEyePosition=[1.2, -0.5, 0.8],
             cameraTargetPosition=[0.5, 0, 0.1],
@@ -343,7 +353,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         )
         self.global_proj_matrix = p.computeProjectionMatrixFOV(
             fov=60,
-            aspect=float(self.img_width) / self.img_height,
+            aspect=4.0 / 3.0,
             nearVal=0.1,
             farVal=100.0
         )
@@ -364,37 +374,24 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         center_x, center_y = 0., 0.
 
         # --- 1. 重置物体 (Object) ---
-        # 从配置中读取距离和方位角范围
-        obj_r = self.np_random.uniform(*self.object_r_range)
-        obj_theta = self.np_random.uniform(*self.object_theta_range)
-        
-        object_x = center_x + obj_r * np.cos(obj_theta)
-        object_y = center_y + obj_r * np.sin(obj_theta)
+        object_x = center_x + self.np_random.uniform(*self.obj_x_range)
+        object_y = center_y + self.np_random.uniform(*self.obj_y_range)
         object_yaw = self.np_random.uniform(-np.pi, np.pi)
         
-        obj_pos = [object_x, object_y, 0.025]
-        obj_base_orn = p.getQuaternionFromEuler([0, -np.pi/2, 0])
-        obj_yaw_orn = p.getQuaternionFromEuler([0, 0, object_yaw])
-        obj_orn = p.multiplyTransforms([0, 0, 0], obj_yaw_orn, [0, 0, 0], obj_base_orn)[1]
+        obj_pos = [object_x, object_y, self.t_block_base_z]
+        obj_orn = self._t_block_orientation(object_yaw)
         
         p.resetBasePositionAndOrientation(self.objectId, obj_pos, obj_orn)
-        p.resetBaseVelocity(self.objectId, [0,0,0], [0,0,0])
+        p.resetBaseVelocity(self.objectId, [0, 0, 0], [0, 0, 0])
 
         # --- 2. 重置目标 (Target) ---
-        # 目标可以相对于物体进行偏移，或者也相对于中心点重置
-        # 这里演示相对于中心点重置
-        tar_r = self.np_random.uniform(*self.target_r_range)
-        tar_theta = self.np_random.uniform(*self.target_theta_range)
-        
-        target_x = center_x + tar_r * np.cos(tar_theta)
-        target_y = center_y + tar_r * np.sin(tar_theta)
+        target_x = center_x + self.np_random.uniform(*self.target_x_range)
+        target_y = center_y + self.np_random.uniform(*self.target_y_range)
         target_yaw = self.np_random.uniform(-np.pi, np.pi)
 
-        self.target_pos = np.array([target_x, target_y, 0.0])
+        self.target_pos = np.array([target_x, target_y, self.t_block_base_z])
         self.target_yaw = target_yaw
-        target_base_orn = p.getQuaternionFromEuler([0, -np.pi/2, 0])
-        target_yaw_orn = p.getQuaternionFromEuler([0, 0, target_yaw])
-        target_orn = p.multiplyTransforms([0, 0, 0], target_yaw_orn, [0, 0, 0], target_base_orn)[1]
+        target_orn = self._t_block_orientation(target_yaw)
         self.target_orn = np.array(target_orn, dtype=np.float32)
         
         p.resetBasePositionAndOrientation(self.targetId, self.target_pos, target_orn)
@@ -410,6 +407,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         ee_pos = self.get_ee_position()[:2]
 
         self.actions[:] = 0.0
+        self.prev_action_world[:] = 0.0
         self.task_reward = 0.0
         self.success_buf = False
         self.prev_obj_pos = obj_pos.copy()
@@ -426,18 +424,14 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         self.actions[:] = action
 
-        # Scale action
-        dx, dy = action * 0.1
-        dx = np.clip(dx, -1. - self.ee_pos[0], 1. - self.ee_pos[0])
-        dy = np.clip(dy, -1. - self.ee_pos[1], 1. - self.ee_pos[1])
-        dx = dx / self.frame_skip
-        dy = dy / self.frame_skip
+        _, obj_orn = p.getBasePositionAndOrientation(self.objectId)
+        obj_heading = self._object_heading_from_quat(obj_orn)
+        delta_pos = self._rotate_xy_obj_to_world(action * self.step_size, obj_heading)
+        self.prev_action_world[:] = delta_pos
         target_ee_pos = self.ee_pos.copy()
 
-        # Physics Stepping (Frame Skip)
-        for i in range(self.frame_skip):
-            target_ee_pos[0] += dx
-            target_ee_pos[1] += dy
+        for alpha in self.smootherstep_alphas:
+            target_ee_pos[:2] += alpha * delta_pos
             p.changeConstraint(self.constraintId, target_ee_pos)
             p.stepSimulation()
             # Enforce flat object constraint simply by re-asserting Z/Orientation IF necessary
@@ -446,7 +440,7 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
             # Here we skip the hack to respect physics, assuming box CoM is low.
 
         if self.render_mode == "human":
-            time.sleep(self.dt * self.frame_skip)
+            time.sleep(self.dt * self.control_freq_inv)
 
         self.step_count += 1
         
@@ -469,6 +463,12 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         """将角度归一化到 [-pi, pi]"""
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
+    def _t_block_orientation(self, yaw: float):
+        # object.obj uses local X as thickness; rotate it onto world Z, then apply planar yaw.
+        flat_orn = p.getQuaternionFromEuler([0.0, math.pi / 2.0, 0.0])
+        yaw_orn = p.getQuaternionFromEuler([0.0, 0.0, yaw])
+        return p.multiplyTransforms([0, 0, 0], yaw_orn, [0, 0, 0], flat_orn)[1]
+
     def _quat_orientation_error(self, obj_quat, target_quat) -> float:
         dot_product = float(np.dot(np.asarray(obj_quat), np.asarray(target_quat)))
         abs_dot = np.clip(abs(dot_product), 0.0, 1.0 - 1e-6)
@@ -488,84 +488,72 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         rot_matrix = p.getMatrixFromQuaternion(obj_quat)
         return math.atan2(rot_matrix[5], rot_matrix[2])
 
+    def _rotate_xy_world_to_obj(self, vec_xy: np.ndarray, heading: float) -> np.ndarray:
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+        return np.array([
+            cos_h * vec_xy[0] + sin_h * vec_xy[1],
+            -sin_h * vec_xy[0] + cos_h * vec_xy[1],
+        ], dtype=np.float32)
+
+    def _rotate_xy_obj_to_world(self, vec_xy: np.ndarray, heading: float) -> np.ndarray:
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+        return np.array([
+            cos_h * vec_xy[0] - sin_h * vec_xy[1],
+            sin_h * vec_xy[0] + cos_h * vec_xy[1],
+        ], dtype=np.float32)
+
+    def _target_quat_in_object_frame(self, obj_quat, target_quat) -> np.ndarray:
+        _, obj_inv_quat = p.invertTransform([0.0, 0.0, 0.0], obj_quat)
+        _, target_obj_quat = p.multiplyTransforms(
+            [0.0, 0.0, 0.0], obj_inv_quat, [0.0, 0.0, 0.0], target_quat
+        )
+        target_obj_quat = np.asarray(target_obj_quat, dtype=np.float32)
+        if target_obj_quat[3] < 0.0:
+            target_obj_quat *= -1.0
+        return target_obj_quat
+
     def _update_observation_history(self, obj_pos: np.ndarray, obj_orn) -> None:
         self.prev_obj_pos = obj_pos.copy()
         self.prev_obj_heading = self._object_heading_from_quat(obj_orn)
 
     def _get_obs(self) -> np.ndarray:
         """Get current observation."""
-        if self.obs_type == "image":
-            obs = self._get_image_obs()
-            obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
-            self._update_observation_history(np.array(obj_pos_3d[:2], dtype=np.float32), obj_orn)
-            return obs
         return self._get_state_obs()
 
     def _get_state_obs(self) -> np.ndarray:
-        """Get 19D state observation."""
+        """Get 13D PushT state observation in the object heading frame."""
         self.ee_pos = self.get_ee_position()
-        ee_pos = self.ee_pos[:2]
+        ee_pos = self.ee_pos[:2].astype(np.float32)
         obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
-        obj_pos = np.array(obj_pos_3d[:2])
-        obj_vel, _ = p.getBaseVelocity(self.objectId)
-        
-        _, _, obj_yaw = p.getEulerFromQuaternion(obj_orn)
+        target_pos_3d, target_orn = p.getBasePositionAndOrientation(self.targetId)
+        obj_pos = np.array(obj_pos_3d[:2], dtype=np.float32)
+        target_pos = np.array(target_pos_3d[:2], dtype=np.float32)
+        obj_heading = self._object_heading_from_quat(obj_orn)
 
-        # Target position
-        target_pos = np.array(self.target_pos[:2])
-        target_yaw = self.target_yaw
+        ee_obj_pos = self._rotate_xy_world_to_obj(ee_pos - obj_pos, obj_heading)
+        target_obj_pos = self._rotate_xy_world_to_obj(target_pos - obj_pos, obj_heading)
+        target_obj_quat = self._target_quat_in_object_frame(obj_orn, target_orn)
+        prev_action_obj = self._rotate_xy_world_to_obj(self.prev_action_world, obj_heading)
+        obj_pos_delta = self._rotate_xy_world_to_obj(obj_pos - self.prev_obj_pos, obj_heading)
+        obj_heading_delta = self._normalize_angle(obj_heading - self.prev_obj_heading)
 
-        # Relative positions
-        ee_to_obj = obj_pos - ee_pos
-        obj_to_target = target_pos - obj_pos
-
-        # Object velocity
-        obj_vel_full, obj_ang_vel_full = p.getBaseVelocity(self.objectId)
-        obj_vel = np.array(obj_vel_full[:2])
-        obj_angular_vel = obj_ang_vel_full[2]
-
-        # Yaw error
-        yaw_error = self._normalize_angle(target_yaw - obj_yaw)
-
-        # Sin/cos encoding
-        obj_yaw_sincos = [np.sin(obj_yaw), np.cos(obj_yaw)]
-        target_yaw_sincos = [np.sin(target_yaw), np.cos(target_yaw)]
-        yaw_error_sincos = [np.sin(yaw_error), np.cos(yaw_error)]
-
-        # Concatenate
         obs = np.concatenate((
-            ee_pos,
-            obj_pos,
-            target_pos,
-            ee_to_obj,
-            obj_to_target,
-            obj_vel,
-            obj_yaw_sincos,
-            target_yaw_sincos,
-            yaw_error_sincos,
-            [obj_angular_vel]
+            ee_obj_pos,
+            target_obj_pos,
+            target_obj_quat,
+            prev_action_obj,
+            obj_pos_delta,
+            [obj_heading_delta],
         ))
 
         self._update_observation_history(obj_pos, obj_orn)
 
         return obs.astype(np.float32)
 
-    def _get_image_obs(self) -> np.ndarray:
-        """Get 84x84 RGB image observation."""
-        w, h, rgb, _, _ = p.getCameraImage(
-            width=self.img_width,
-            height=self.img_height,
-            viewMatrix=self.view_matrix,
-            projectionMatrix=self.proj_matrix,
-            renderer=p.ER_TINY_RENDERER
-        )
-        rgb = np.array(rgb, dtype=np.uint8)
-        rgb = np.reshape(rgb, (h, w, 4))
-        rgb = rgb[:, :, :3]
-        return rgb
-
     def _compute_reward(self) -> Tuple[float, bool, bool]:
-        """Compute reward, terminated, truncated using the OpenPush PushT formula."""
+        """Compute reward, terminated, truncated using the PushT-style formula."""
         obj_pos_3d, obj_orn = p.getBasePositionAndOrientation(self.objectId)
         target_pos_3d, target_orn = p.getBasePositionAndOrientation(self.targetId)
         obj_pos = np.array(obj_pos_3d[:2], dtype=np.float32)

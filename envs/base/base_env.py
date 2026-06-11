@@ -10,122 +10,6 @@ from typing import Dict, Any, Tuple, Optional
 import numpy as np
 
 
-class BasePushEnvConfig:
-    """Configuration class for push environment.
-
-    This class holds configuration parameters shared by the PyBullet backends.
-    """
-
-    def __init__(
-        self,
-        # Episode settings
-        max_episode_steps: int = 200,
-
-        # End-effector settings
-        fixed_ee_z: float = 0.1,
-        fixed_ee_initial_pos: Tuple[float, float] = (0.15, 0.0),
-
-        # Success thresholds
-        success_threshold: float = 0.05,
-        orientation_threshold: float = 3.14,
-
-        # Object and target dimensions
-        object_half_extents: Tuple[float, float, float] = (0.06, 0.04, 0.05),
-        target_half_extents: Tuple[float, float, float] = (0.06, 0.04, 0.001),
-
-        # Spawn ranges
-        object_r_range: Tuple[float, float] = (0.2, 0.5),
-        object_theta_range: Tuple[float, float] = (-1.57, 0),
-        target_r_range: Tuple[float, float] = (0.5, 0.9),
-        target_theta_range: Tuple[float, float] = (-1.57, 1),
-
-        # Reward coefficients
-        distance_coef: float = 1.0,
-        position_progress_coef: float = 30.0,
-        orientation_progress_coef: float = 15.0,
-        coupling_coef: float = 20.0,
-        alignment_coef: float = 0.2,
-        ee_approach_coef: float = 10.0,
-        contact_threshold: float = 0.15,
-        contact_reward: float = 0.05,
-        success_bonus: float = 100.0,
-        step_penalty: float = -0.01,
-    ):
-        # Episode settings
-        self.max_episode_steps = max_episode_steps
-
-        # End-effector settings
-        self.fixed_ee_z = fixed_ee_z
-        self.fixed_ee_initial_pos = fixed_ee_initial_pos
-
-        # Success thresholds
-        self.success_threshold = success_threshold
-        self.orientation_threshold = orientation_threshold
-
-        # Object and target dimensions
-        self.object_half_extents = object_half_extents
-        self.target_half_extents = target_half_extents
-
-        # Spawn ranges
-        self.object_r_range = object_r_range
-        self.object_theta_range = object_theta_range
-        self.target_r_range = target_r_range
-        self.target_theta_range = target_theta_range
-
-        # Reward coefficients
-        self.distance_coef = distance_coef
-        self.position_progress_coef = position_progress_coef
-        self.orientation_progress_coef = orientation_progress_coef
-        self.coupling_coef = coupling_coef
-        self.alignment_coef = alignment_coef
-        self.ee_approach_coef = ee_approach_coef
-        self.contact_threshold = contact_threshold
-        self.contact_reward = contact_reward
-        self.success_bonus = success_bonus
-        self.step_penalty = step_penalty
-
-    @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "BasePushEnvConfig":
-        """Create config from dictionary (e.g., loaded from YAML)."""
-        env_cfg = config_dict.get("env", {})
-        reward_cfg = config_dict.get("reward", {})
-
-        return cls(
-            # Episode settings
-            max_episode_steps=env_cfg.get("max_episode_steps", 200),
-
-            # End-effector settings
-            fixed_ee_z=env_cfg.get("fixed_ee_z", 0.1),
-            fixed_ee_initial_pos=tuple(env_cfg.get("fixed_ee_initial_pos", [0.15, 0.0])),
-
-            # Success thresholds
-            success_threshold=env_cfg.get("success_threshold", 0.05),
-            orientation_threshold=env_cfg.get("orientation_threshold", 3.14),
-
-            # Object and target dimensions
-            object_half_extents=tuple(env_cfg.get("object_half_extents", [0.06, 0.04, 0.05])),
-            target_half_extents=tuple(env_cfg.get("target_half_extents", [0.06, 0.04, 0.001])),
-
-            # Spawn ranges
-            object_r_range=tuple(env_cfg.get("object_r_range", [0.2, 0.5])),
-            object_theta_range=tuple(env_cfg.get("object_theta_range", [-1.57, 0])),
-            target_r_range=tuple(env_cfg.get("target_r_range", [0.5, 0.9])),
-            target_theta_range=tuple(env_cfg.get("target_theta_range", [-1.57, 1])),
-
-            # Reward coefficients
-            distance_coef=reward_cfg.get("distance_coef", 1.0),
-            position_progress_coef=reward_cfg.get("position_progress_coef", 30.0),
-            orientation_progress_coef=reward_cfg.get("orientation_progress_coef", 15.0),
-            coupling_coef=reward_cfg.get("coupling_coef", 20.0),
-            alignment_coef=reward_cfg.get("alignment_coef", 0.2),
-            ee_approach_coef=reward_cfg.get("ee_approach_coef", 10.0),
-            contact_threshold=reward_cfg.get("contact_threshold", 0.15),
-            contact_reward=reward_cfg.get("contact_reward", 0.05),
-            success_bonus=reward_cfg.get("success_bonus", 100.0),
-            step_penalty=reward_cfg.get("step_penalty", -0.01),
-        )
-
-
 class BasePushEnv(ABC):
     """Abstract base class for push task environment.
 
@@ -156,7 +40,7 @@ class BasePushEnv(ABC):
 
     def __init__(
         self,
-        cfg: BasePushEnvConfig,
+        cfg: Any,
         render_mode: Optional[str] = None,
         obs_type: str = "state",
         num_envs: int = 1,

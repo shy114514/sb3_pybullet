@@ -1,3 +1,3 @@
-from .base_env import BasePushEnv, BasePushEnvConfig
+from .base_env import BasePushEnv
 
-__all__ = ["BasePushEnv", "BasePushEnvConfig"]
+__all__ = ["BasePushEnv"]

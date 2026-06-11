@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,8 +17,8 @@ import pybullet as p
 from scipy.spatial.transform import Rotation as R
 
 from .push_env import PyBulletPushEnv
-from ..base import BasePushEnvConfig
 
+WM_BOOST = False
 
 class MLPV(torch.nn.Module):
     """Velocity model used by current PINN notebooks (predicts 2D translational velocity)."""
@@ -172,7 +172,7 @@ def _infer_pose(
 
     # PyBullet contact distance is negative during penetration.
     penetration_depth = max(0.0, float(-np.min(contact_distances)))
-    if penetration_depth > depth_threshold:
+    if WM_BOOST and penetration_depth > depth_threshold:
         depth_excess = penetration_depth - depth_threshold
         normalized_excess = depth_excess / max(depth_threshold, 1e-6)
         boost = 1.0 + depth_boost_gain * normalized_excess
@@ -184,8 +184,8 @@ def _infer_pose(
 
     w_next_b = np.zeros(3, dtype=np.float32)
     v_next_b = np.zeros(3, dtype=np.float32)
-    w_next_b[0] = wz_pred
-    v_next_b[1] = vxy_pred[0]
+    w_next_b[1] = wz_pred
+    v_next_b[0] = vxy_pred[0]
     v_next_b[2] = vxy_pred[1]
 
     v_next_w = r_wb.apply(v_next_b)
@@ -207,7 +207,7 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
 
     def __init__(
         self,
-        cfg: BasePushEnvConfig,
+        cfg: Any,
         render_mode: Optional[str] = None,
         obs_type: str = "state",
         num_envs: int = 1,
@@ -219,8 +219,7 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
         self.model_v_path = os.getenv("WM_V_MODEL_PATH", os.path.join(model_dir, "v_prediction.pth"))
         self.model_w_path = os.getenv("WM_W_MODEL_PATH", os.path.join(model_dir, "w_prediction.pth"))
         self.wm_device = device
-        self.dt = 1.0 / 24.0
-        self.frame_skip = 2
+        self.dt = 1.0 / 12.0
         self.contact_depth_threshold = 0.002
         self.contact_depth_boost_gain = 0.5
         self.contact_depth_boost_max = 2.0
@@ -239,33 +238,19 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
         self._wm_xt = np.zeros(12, dtype=np.float32)
 
     def _constrain_to_horizontal_plane(self, xt: np.ndarray) -> np.ndarray:
-        """
-        Constrain object pose to horizontal plane:
-        - Keep Z position unchanged
-        - Extract yaw angle and set roll, pitch to 0
-        - Only allow rotation around Z axis
-        """
+        """(Maybe not proper)Keep the mesh T block flat on the table while preserving planar yaw."""
         xt_constrained = xt.copy()
-        
-        # Get original position and keep Z unchanged
-        original_z = xt[2]
-        xt_constrained[2] = original_z
-        
-        # Extract yaw from rotation vector
-        rotvec = xt[3:6]
-        rot = R.from_rotvec(rotvec)
-        euler = rot.as_euler('xyz')  # roll, pitch, yaw
-        
-        # Keep only yaw, set roll and pitch to 0
-        constrained_euler = np.array([0.0, 0.0, euler[2]], dtype=np.float32)
-        constrained_rot = R.from_euler('xyz', constrained_euler)
+
+        xt_constrained[2] = self.t_block_base_z
+
+        yaw = R.from_rotvec(xt[3:6]).as_euler("xyz")[2]
+        constrained_rot = R.from_euler("z", yaw) * R.from_euler("y", np.pi / 2.0)
         xt_constrained[3:6] = constrained_rot.as_rotvec().astype(np.float32)
-        
-        # Keep velocity but zero out Z component and angular components on X, Y
-        xt_constrained[8] = 0.0  # vz = 0
-        xt_constrained[10] = 0.0  # wx = 0
-        xt_constrained[11] = 0.0  # wy = 0
-        
+
+        xt_constrained[8] = 0.0
+        xt_constrained[9] = 0.0
+        xt_constrained[10] = 0.0
+
         return xt_constrained
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -287,26 +272,23 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         self.actions[:] = action
 
-        dx, dy = action * 0.1
-        dx = np.clip(dx, -1.0 - self.ee_pos[0], 1.0 - self.ee_pos[0])
-        dy = np.clip(dy, -1.0 - self.ee_pos[1], 1.0 - self.ee_pos[1])
-
+        _, obj_orn = p.getBasePositionAndOrientation(self.objectId)
+        obj_heading = self._object_heading_from_quat(obj_orn)
+        delta_pos = self._rotate_xy_obj_to_world(action * self.step_size, obj_heading)
+        self.prev_action_world[:] = delta_pos
         target_ee_pos = self.ee_pos.copy()
-        target_ee_pos[0] += dx
-        target_ee_pos[1] += dy
+        target_ee_pos[:2] += delta_pos
 
         at = np.zeros(12, dtype=np.float32)
-        at[6:9] = np.array([dx / self.dt, dy / self.dt, 0.0], dtype=np.float32)
+        at[6:9] = np.array([delta_pos[0] / self.dt, delta_pos[1] / self.dt, 0.0], dtype=np.float32)
         at[9:12] = np.zeros(3, dtype=np.float32)
 
-        # Teleport EE directly according to action (no physics stepping).
         _, ee_orn = p.getBasePositionAndOrientation(self.eeId)
         p.resetBasePositionAndOrientation(self.eeId, target_ee_pos.tolist(), ee_orn)
         p.resetBaseVelocity(self.eeId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
 
         p.performCollisionDetection()
 
-        # Only use WM transition when there is actual contact.
         contacts = p.getContactPoints(bodyA=self.objectId, bodyB=self.eeId)
         has_collision = len(contacts) > 0
 
@@ -330,7 +312,6 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
                 depth_boost_gain=self.contact_depth_boost_gain,
                 depth_boost_max=self.contact_depth_boost_max,
             )
-            # Constrain to horizontal plane (Z fixed, yaw only)
             # self._wm_xt = self._constrain_to_horizontal_plane(self._wm_xt)
 
             next_quat = R.from_rotvec(self._wm_xt[3:6]).as_quat()

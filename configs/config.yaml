@@ -6,6 +6,8 @@
 env:
   max_episode_steps: 200        # Maximum steps per episode
   fixed_ee_z: 0.001               # Fixed end-effector height (m)
+  step_size: 0.1                  # End-effector XY movement per action
+  control_freq_inv: 24            # Physics steps per control action
   success_threshold: 0.03       # Distance threshold for success (m)
   orientation_threshold: 3.14    # Orientation threshold for success (rad, ~180 degrees)
 
@@ -14,15 +16,15 @@ env:
   target_half_extents: [0.06, 0.04, 0.001] # Target visual half size (x, y, z) in meters
 
   # Object spawn range
-  object_r_range: [0.5, 0.6]
-  object_theta_range: [-0.8, -0.2]
+  obj_x_range: [0.35, 0.59]
+  obj_y_range: [-0.43, -0.10]
 
   # Target spawn range
-  target_r_range: [0.65, 0.75]
-  target_theta_range: [-0.8, 0.]  # Around pi (opposite side)
+  target_x_range: [0.45, 0.75]
+  target_y_range: [-0.54, 0.0]
 
   # Fixed EE initial position (set to avoid collision with object)
-  # Object x_range is [0.3, 0.5], so EE at x=0.15 is safely behind
+  # Object x_range starts at 0.35, so EE at x=0.15 is safely behind
   fixed_ee_initial_pos: [0.15, 0.0]  # [x, y] position for EE reset
 
 # Reward settings (一阶段训练：同时学习位置和方向)
