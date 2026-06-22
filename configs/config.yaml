@@ -27,23 +27,20 @@ env:
   # Object x_range starts at 0.35, so EE at x=0.15 is safely behind
   fixed_ee_initial_pos: [0.15, 0.0]  # [x, y] position for EE reset
 
-# Reward settings (一阶段训练：同时学习位置和方向)
+# Reward settings
 reward:
-  # 进度奖励系数（增量式）
-  distance_coef: 0.05               # 位置距离奖励系数（取消）
-  position_progress_coef: 5.0     # 位置进度奖励系数（提高权重）
-  orientation_progress_coef: 3.0  # 方向进度奖励系数（提高权重）
-  coupling_coef: 0.0              # 耦合奖励系数（两者同时改进时的bonus，提高以鼓励协同）
-  alignment_coef: 0.0              # 推动方向对齐奖励系数（取消）
-
-  # EE接近物体的奖励
-  ee_approach_coef: 5.0            # EE接近物体的奖励系数（降低，减少干扰）
-  contact_threshold: 0.15          # 判定为"接触"的距离阈值 (m)
-  contact_reward: 0.05             # 接触后的基础奖励
-
-  # 成功奖励和步数惩罚
-  success_bonus: 100.0             # 成功到达目标的奖励（提高）
-  step_penalty: -0.01              # 每步惩罚（鼓励尽快完成）
+  alpha: 5.0
+  w_pos: 100.0
+  w_pose: 100.0
+  w_align: 2.0
+  gamma: 0.001
+  successBonus: 100.0
+  stepPenalty: -0.1
+  crashPenalty: -100.0
+  crashDeltaThresh: 0.1
+  posThresh: 0.03
+  posDeadzone: 0.06
+  oriThresh: 1.0
 
 # Training settings
 training:

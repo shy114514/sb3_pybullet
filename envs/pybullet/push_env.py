@@ -93,19 +93,19 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self.target_orn = np.array([0.0, 0.0, 0.0, 1.0])
 
         # Reward state for the PushT-style task.
-        self.alpha = getattr(self.cfg, "alpha", 5.0)
-        self.w_pos = getattr(self.cfg, "w_pos", 100.0)
-        self.w_pose = getattr(self.cfg, "w_pose", 100.0)
-        self.w_align = getattr(self.cfg, "w_align", 2.0)
-        self.gamma = getattr(self.cfg, "gamma", 0.001)
-        self.success_bonus = getattr(self.cfg, "successBonus", 100.0)
-        self.step_penalty = getattr(self.cfg, "stepPenalty", -0.1)
-        self.crash_penalty = getattr(self.cfg, "crashPenalty", -100.0)
-        self.crash_delta_thresh = getattr(self.cfg, "crashDeltaThresh", 0.1)
-        self.base_pos_thresh = getattr(self.cfg, "posThresh", 0.03)
+        self.alpha = self._cfg_value("alpha", "alpha", 5.0)
+        self.w_pos = self._cfg_value("w_pos", "position_progress_coef", 100.0)
+        self.w_pose = self._cfg_value("w_pose", "orientation_progress_coef", 100.0)
+        self.w_align = self._cfg_value("w_align", "alignment_coef", 2.0)
+        self.gamma = self._cfg_value("gamma", "gamma", 0.001)
+        self.success_bonus = self._cfg_value("successBonus", "success_bonus", 100.0)
+        self.step_penalty = self._cfg_value("stepPenalty", "step_penalty", -0.1)
+        self.crash_penalty = self._cfg_value("crashPenalty", "crash_penalty", -100.0)
+        self.crash_delta_thresh = self._cfg_value("crashDeltaThresh", "crash_delta_thresh", 0.1)
+        self.base_pos_thresh = self._cfg_value("posThresh", "success_threshold", 0.03)
         self.pos_thresh = self.base_pos_thresh
-        self.pos_deadzone = getattr(self.cfg, "posDeadzone", 0.06)
-        self.base_ori_thresh = getattr(self.cfg, "oriThresh", 1.0)
+        self.pos_deadzone = self._cfg_value("posDeadzone", "pos_deadzone", 0.06)
+        self.base_ori_thresh = self._cfg_value("oriThresh", "orientation_threshold", 1.0)
         self.ori_thresh = self.base_ori_thresh
         self.actions = np.zeros(2, dtype=np.float32)
         self.prev_action_world = np.zeros(2, dtype=np.float32)
@@ -125,6 +125,13 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self._load_static_resources()
         self._create_dynamic_actors()
         self._setup_cameras()
+
+    def _cfg_value(self, primary_name: str, fallback_name: str, default):
+        if hasattr(self.cfg, primary_name):
+            return getattr(self.cfg, primary_name)
+        if hasattr(self.cfg, fallback_name):
+            return getattr(self.cfg, fallback_name)
+        return default
 
     def _make_smootherstep_alphas(self, steps: int) -> np.ndarray:
         t = np.linspace(1.0 / steps, 1.0, steps, dtype=np.float32)
