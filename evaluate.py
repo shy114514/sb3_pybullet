@@ -29,6 +29,8 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from utils import get_env_cfg, load_yaml_config
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "config.yaml")
 
@@ -412,7 +414,6 @@ def print_summary(results):
 def evaluate(args):
     """Main evaluation function."""
     from envs import get_available_backends
-    from envs.factory import load_config_from_yaml
 
     available_backends = get_available_backends()
     if args.backend not in available_backends:
@@ -430,7 +431,7 @@ def evaluate(args):
 
     # Load config
     if args.config:
-        cfg = load_config_from_yaml(args.config)
+        cfg = get_env_cfg(load_yaml_config(args.config))
         print(f"Loaded config from {args.config}")
     else:
         # Try to load from model directory
@@ -439,14 +440,14 @@ def evaluate(args):
         flag = False
         for _ in range(4):
             if os.path.exists(config_path):
-                cfg = load_config_from_yaml(config_path)
+                cfg = get_env_cfg(load_yaml_config(config_path))
                 print(f"Loaded config from {config_path}")
                 flag = True
                 break
             config_dir = os.path.dirname(config_dir)
             config_path = os.path.join(config_dir, "config_used.yaml")
         if not flag:
-            cfg = load_config_from_yaml(DEFAULT_CONFIG_PATH)
+            cfg = get_env_cfg(load_yaml_config(DEFAULT_CONFIG_PATH))
             print(f"Loaded default config from {DEFAULT_CONFIG_PATH}")
 
     # Output directory

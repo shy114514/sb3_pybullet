@@ -1,6 +1,5 @@
 """Environment factory for PyBullet push-task environments."""
 
-from types import SimpleNamespace
 from typing import Any, List, Optional
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
@@ -47,7 +46,7 @@ def make_env(
         )
 
     if cfg is None:
-        raise ValueError("cfg is required; load it with load_config_from_yaml() and pass it explicitly.")
+        raise ValueError("cfg is required; load an environment configuration and pass it explicitly.")
 
     if max_episode_steps is not None:
         cfg.max_episode_steps = max_episode_steps
@@ -101,7 +100,7 @@ def make_vec_env(
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
     if cfg is None:
-        raise ValueError("cfg is required; load it with load_config_from_yaml() and pass it explicitly.")
+        raise ValueError("cfg is required; load an environment configuration and pass it explicitly.")
 
     if max_episode_steps is not None:
         cfg.max_episode_steps = max_episode_steps
@@ -137,24 +136,3 @@ def make_vec_env(
     env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=0.99)
 
     return env
-
-
-def load_config_from_yaml(yaml_path: str) -> SimpleNamespace:
-    """Load environment configuration from YAML file.
-
-    Args:
-        yaml_path: Path to YAML configuration file.
-
-    Returns:
-        SimpleNamespace with env and reward YAML keys exposed as attributes.
-    """
-    import yaml
-
-    with open(yaml_path, 'r', encoding="utf-8") as f:
-        config_dict = yaml.safe_load(f)
-
-    cfg = {}
-    for section_name in ("env", "reward"):
-        cfg.update(config_dict[section_name])
-
-    return SimpleNamespace(**cfg)

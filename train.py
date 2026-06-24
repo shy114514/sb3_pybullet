@@ -19,7 +19,6 @@ Usage:
 import os
 import argparse
 import shutil
-from datetime import datetime
 import time
 import glob
 import re
@@ -27,11 +26,12 @@ import csv
 
 import numpy as np
 import torch
-import yaml
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv, sync_envs_normalization
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+
+from utils import get_env_cfg, get_train_cfg, load_yaml_config
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "config.yaml")
@@ -244,7 +244,7 @@ class PeriodicInferenceCallback(BaseCallback):
     def __init__(
         self,
         args,
-        cfg,
+        env_cfg,
         save_dir: str,
         eval_freq: int,
         n_eval_episodes: int = 2,
@@ -255,7 +255,7 @@ class PeriodicInferenceCallback(BaseCallback):
     ):
         super().__init__(verbose)
         self.args = args
-        self.cfg = cfg
+        self.env_cfg = env_cfg
         self.save_dir = save_dir
         self.eval_freq = eval_freq
         self.n_eval_episodes = max(1, n_eval_episodes)
@@ -278,7 +278,7 @@ class PeriodicInferenceCallback(BaseCallback):
                 writer = csv.writer(f)
                 writer.writerow(["timesteps", "success_rate", "mean_reward", "mean_length", "video"])
 
-        self.eval_env = create_eval_env(self.args, self.cfg)
+        self.eval_env = create_eval_env(self.args, self.env_cfg)
         self.last_eval_step = self.model.num_timesteps
 
     def _on_step(self) -> bool:
@@ -352,7 +352,7 @@ class PeriodicInferenceCallback(BaseCallback):
         ep_length = 0
         success = False
         frames = []
-        max_steps = int(getattr(self.cfg, "max_episode_steps", 300))
+        max_steps = int(getattr(self.env_cfg, "max_episode_steps", 300))
 
         while not done and ep_length < max_steps:
             if self.save_video and not self._video_disabled_by_error:
@@ -495,7 +495,7 @@ def resolve_checkpoint_path(checkpoint_path: str):
 
 
 
-def create_env(args, cfg, vecnorm_path=None):
+def create_env(args, env_cfg, vecnorm_path=None):
     """Create training environment."""
     from envs import make_vec_env
 
@@ -504,7 +504,7 @@ def create_env(args, cfg, vecnorm_path=None):
 
     env = make_vec_env(
         backend=args.backend,
-        cfg=cfg,
+        cfg=env_cfg,
         n_envs=args.n_envs,
         obs_type=args.obs_type,
         device=device,
@@ -521,13 +521,13 @@ def create_env(args, cfg, vecnorm_path=None):
     return env
 
 
-def create_eval_env(args, cfg):
+def create_eval_env(args, env_cfg):
     """Create a single-env evaluation environment for periodic inference."""
     from envs import make_env
 
     env = make_env(
         backend=args.backend,
-        cfg=cfg,
+        cfg=env_cfg,
         obs_type=args.obs_type,
         render_mode="rgb_array",
         device=args.device,
@@ -541,26 +541,26 @@ def create_eval_env(args, cfg):
     return env
 
 
-def create_callbacks(args, cfg, config, env, n_envs):
+def create_callbacks(args, env_cfg, train_cfg, env, n_envs):
     """Create training callbacks."""
     callbacks = []
 
     progress_callback = ProgressBarCallback(
         total_timesteps=args.timesteps,
-        update_freq=config["progress_update_freq"],
+        update_freq=train_cfg["progress_update_freq"],
         verbose=1,
-        curriculum_threshold=cfg.training.curriculum_threshold,
+        curriculum_threshold=train_cfg["curriculum_threshold"],
     )
     callbacks.append(progress_callback)
 
     if args.save_freq is not None:
-        checkpoint_path = config["checkpoint_path"]
+        checkpoint_path = train_cfg["checkpoint_path"]
         os.makedirs(checkpoint_path, exist_ok=True)
 
         checkpoint_callback = CheckpointCallback(
             save_freq=max(args.save_freq // n_envs, 1),
             save_path=checkpoint_path,
-            name_prefix=config["model_name"],
+            name_prefix=train_cfg["model_name"],
         )
         callbacks.append(checkpoint_callback)
 
@@ -568,15 +568,15 @@ def create_callbacks(args, cfg, config, env, n_envs):
             norm_callback = SaveVecNormalizeCallback(
                 save_freq=max(args.save_freq // n_envs, 1),
                 save_path=checkpoint_path,
-                name_prefix=config["model_name"],
+                name_prefix=train_cfg["model_name"],
             )
             callbacks.append(norm_callback)
 
     if args.eval_freq > 0:
         periodic_eval_callback = PeriodicInferenceCallback(
             args=args,
-            cfg=cfg,
-            save_dir=os.path.join(config["run_dir"], "periodic_eval"),
+            env_cfg=env_cfg,
+            save_dir=os.path.join(train_cfg["run_dir"], "periodic_eval"),
             eval_freq=args.eval_freq,
             n_eval_episodes=args.eval_episodes,
             save_video=args.eval_save_video,
@@ -589,67 +589,9 @@ def create_callbacks(args, cfg, config, env, n_envs):
     return callbacks
 
 
-def load_raw_config(config_path: str) -> dict:
-    """Load the YAML config as a dictionary."""
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def get_training_config(args, config_path: str):
-    """Get run paths and PPO configuration."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    if args.run_dir:
-        run_dir = args.run_dir
-    else:
-        run_dir = os.path.join("./runs", f"{timestamp}_{args.backend}")
-
-    model_dir = os.path.join(run_dir, "models")
-
-    raw_config = load_raw_config(config_path)
-    training_config = raw_config.get("training", {})
-    obs_training_config = training_config.get(args.obs_type, {})
-
-    config = {
-        "model_dir": model_dir,
-        "run_dir": run_dir,
-        "checkpoint_path": os.path.join(model_dir, "checkpoints"),
-        "tensorboard_log": os.path.join(run_dir, "tensorboard"),
-        "model_save_path": os.path.join(model_dir, "ppo_push_robot"),
-        "model_name": "ppo_push_robot",
-        "progress_update_freq": training_config.get("progress_update_freq", 32768),
-    }
-
-    common_ppo_defaults = {
-        "learning_rate": 0.0001,
-        "n_steps": 2048,
-        "batch_size": 256,
-        "n_epochs": 10,
-        "gamma": 0.99,
-        "gae_lambda": 0.95,
-        "clip_range": 0.2,
-        "ent_coef": 0.01,
-    }
-    ppo_kwargs = {
-        key: obs_training_config.get(key, default)
-        for key, default in common_ppo_defaults.items()
-    }
-
-    config["policy_type"] = "MlpPolicy"
-    ppo_kwargs["policy_kwargs"] = dict(net_arch=dict(
-        pi=obs_training_config.get("net_arch_pi", [256, 256, 128]),
-        vf=obs_training_config.get("net_arch_vf", [256, 256, 128]),
-    ))
-
-    config["ppo_kwargs"] = ppo_kwargs
-
-    return config
-
-
 def train(args):
     """Main training function."""
     from envs import get_available_backends
-    from envs.factory import load_config_from_yaml
 
     # Check backend availability
     available_backends = get_available_backends()
@@ -663,29 +605,29 @@ def train(args):
     print(f"Number of environments: {args.n_envs}")
 
     config_path = args.config or DEFAULT_CONFIG_PATH
-    cfg = load_config_from_yaml(config_path)
+    yaml_config = load_yaml_config(config_path)
+    env_cfg = get_env_cfg(yaml_config)
     print(f"Using config file: {config_path}")
 
-    # Get training config
-    config = get_training_config(args, config_path)
+    train_cfg = get_train_cfg(args, yaml_config)
 
     # Create output directories and save config before training.
-    os.makedirs(config["model_dir"], exist_ok=True)
-    os.makedirs(config["run_dir"], exist_ok=True)
-    config_dst = os.path.join(config["run_dir"], "config_used.yaml")
+    os.makedirs(train_cfg["model_dir"], exist_ok=True)
+    os.makedirs(train_cfg["run_dir"], exist_ok=True)
+    config_dst = os.path.join(train_cfg["run_dir"], "config_used.yaml")
     shutil.copy(config_path, config_dst)
     print(f"Config saved: {config_dst}")
-    print(f"Run records: {config['run_dir']}")
-    print(f"Model outputs: {config['model_dir']}")
+    print(f"Run records: {train_cfg['run_dir']}")
+    print(f"Model outputs: {train_cfg['model_dir']}")
 
     # Resolve checkpoint
     model_path, vecnorm_path = resolve_checkpoint_path(args.load_checkpoint)
 
     # Create environment
-    env = create_env(args, cfg, vecnorm_path)
+    env = create_env(args, env_cfg, vecnorm_path)
 
     # Create callbacks
-    callbacks = create_callbacks(args, cfg, config, env, args.n_envs)
+    callbacks = create_callbacks(args, env_cfg, train_cfg, env, args.n_envs)
 
     # Determine device
     device = args.device
@@ -694,23 +636,23 @@ def train(args):
     # Create or load model
     if model_path:
         print(f"Loading model from checkpoint: {model_path}")
-        model = PPO.load(model_path, env=env, tensorboard_log=config["tensorboard_log"])
+        model = PPO.load(model_path, env=env, tensorboard_log=train_cfg["tensorboard_log"])
         reset_num_timesteps = False
     else:
-        print(f"Creating new PPO model with {config['policy_type']}...")
+        print(f"Creating new PPO model with {train_cfg['policy_type']}...")
         model = PPO(
-            config["policy_type"],
+            train_cfg["policy_type"],
             env,
             verbose=0,
-            tensorboard_log=config["tensorboard_log"],
+            tensorboard_log=train_cfg["tensorboard_log"],
             device=device,
-            **config["ppo_kwargs"],
+            **train_cfg["ppo_kwargs"],
         )
         reset_num_timesteps = True
 
     # Train
     print(f"Training for {args.timesteps} timesteps...")
-    print(f"TensorBoard logs: tensorboard --logdir {config['tensorboard_log']}")
+    print(f"TensorBoard logs: tensorboard --logdir {train_cfg['tensorboard_log']}")
     print("-" * 80)
 
     model.learn(
@@ -720,14 +662,14 @@ def train(args):
     )
 
     # Save final model
-    os.makedirs(config["model_dir"], exist_ok=True)
-    model.save(config["model_save_path"])
-    print(f"Model saved: {config['model_save_path']}")
+    os.makedirs(train_cfg["model_dir"], exist_ok=True)
+    model.save(train_cfg["model_save_path"])
+    print(f"Model saved: {train_cfg['model_save_path']}")
 
     # Save VecNormalize stats
     if isinstance(env, VecNormalize):
-        env.save(config["model_save_path"] + "_vecnormalize.pkl")
-        print(f"VecNormalize saved: {config['model_save_path']}_vecnormalize.pkl")
+        env.save(train_cfg["model_save_path"] + "_vecnormalize.pkl")
+        print(f"VecNormalize saved: {train_cfg['model_save_path']}_vecnormalize.pkl")
 
     env.close()
     print("Training complete!")
@@ -735,7 +677,6 @@ def train(args):
 def test_env(args):
     """Run an interactive environment test."""
     from envs import get_available_backends
-    from envs.factory import load_config_from_yaml
 
     # Check backend availability
     available_backends = get_available_backends()
@@ -749,25 +690,25 @@ def test_env(args):
     print(f"Number of environments: {args.n_envs}")
 
     config_path = args.config or DEFAULT_CONFIG_PATH
-    cfg = load_config_from_yaml(config_path)
+    yaml_config = load_yaml_config(config_path)
+    env_cfg = get_env_cfg(yaml_config)
     print(f"Using config file: {config_path}")
-    cfg.max_episode_steps = 1000
+    env_cfg.max_episode_steps = 1000
 
-    # Get training config
-    config = get_training_config(args, config_path)
+    train_cfg = get_train_cfg(args, yaml_config)
 
     # Create run directory and save config before testing.
-    os.makedirs(config["run_dir"], exist_ok=True)
-    config_dst = os.path.join(config["run_dir"], "config_used.yaml")
+    os.makedirs(train_cfg["run_dir"], exist_ok=True)
+    config_dst = os.path.join(train_cfg["run_dir"], "config_used.yaml")
     shutil.copy(config_path, config_dst)
     print(f"Config saved: {config_dst}")
-    print(f"Run records: {config['run_dir']}")
+    print(f"Run records: {train_cfg['run_dir']}")
 
     # Resolve checkpoint
     model_path, vecnorm_path = resolve_checkpoint_path(args.load_checkpoint)
 
     # Create environment
-    env = create_env(args, cfg, vecnorm_path)
+    env = create_env(args, env_cfg, vecnorm_path)
 
     obs = env.reset()
 
