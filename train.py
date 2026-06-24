@@ -118,7 +118,7 @@ class ProgressBarCallback(BaseCallback):
         self.target_timesteps = self.initial_timesteps + self.total_timesteps
         self.last_update_step = self.initial_timesteps
         print("Training progress:")
-        self.logger.record("curriculum/difficulty", 0)
+        self.logger.record("curriculum/difficulty", self.training_env.get_attr('difficulty')[0])
 
     def _on_rollout_start(self) -> None:
         now = time.time()
@@ -130,16 +130,11 @@ class ProgressBarCallback(BaseCallback):
 
         success_rate = (np.mean(self.episode_is_success[-100:])) if self.episode_is_success else 0.0
         if success_rate > self.curriculum_threshold:
-            try:
-                difficulty = self.training_env.get_attr('difficulty')[0]
-                if difficulty >= 13:
-                    self.logger.record("curriculum/difficulty", difficulty)
-                    return
-                difficulty += 1
-                self.logger.record("curriculum/difficulty", difficulty)
-                self.training_env.env_method("set_difficulty", difficulty)
-            except Exception:
-                pass
+            difficulty = self.training_env.get_attr('difficulty')[0]
+            difficulty += 1
+            self.training_env.env_method("set_difficulty", difficulty)
+            self.logger.record("curriculum/difficulty", difficulty)
+            print(f"Curriculum updated: success_rate={success_rate:.2f}, new difficulty={difficulty}")
 
     def _on_rollout_end(self) -> None:
         now = time.time()
