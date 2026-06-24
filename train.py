@@ -17,7 +17,6 @@ Usage:
 """
 
 import os
-import sys
 import argparse
 import shutil
 from datetime import datetime
@@ -54,7 +53,7 @@ def parse_args():
     # Training parameters
     parser.add_argument("--timesteps", type=int, default=1000000,
                         help="Total training timesteps")
-    parser.add_argument("--n-envs", type=int, default=16,
+    parser.add_argument("--n-envs", type=int, default=8,
                         help="Number of parallel environments")
     parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "cuda"],
@@ -118,7 +117,7 @@ class ProgressBarCallback(BaseCallback):
         self.initial_timesteps = self.model.num_timesteps
         self.target_timesteps = self.initial_timesteps + self.total_timesteps
         self.last_update_step = self.initial_timesteps
-        print("\n" * 7) # 预留行数增加到7行以适应新的UI
+        print("Training progress:")
         self.logger.record("curriculum/difficulty", 0)
 
     def _on_rollout_start(self) -> None:
@@ -193,34 +192,18 @@ class ProgressBarCallback(BaseCallback):
             reward_str = "N/A"
             length_str = "N/A"
 
-        rollout_str = f"{self.last_rollout_dt:.1f}s"
-        train_str = f"{self.last_train_dt:.1f}s"
-
         bar_length = 40
         filled_length = int(bar_length * progress)
         bar = "█" * filled_length + "░" * (bar_length - filled_length)
-
         elapsed_str = self._format_time(elapsed_time)
-
-
-        status_lines = [
-            f"╔{'═' * 58}╗",
-            f"║  [{bar}] {progress_percent:5.1f}%  ║",
-            f"╠{'═' * 58}╣",
-            f"║  Steps: {steps_done:>10,} / {self.total_timesteps:<10,} (Total: {current_steps:,}) ║",
-            f"║  FPS: {fps_str:>8}  │  Elapsed: {elapsed_str}  │  ETA: {eta_str}  ║",
-            f"║  Reward: {reward_str:>8}  │  EpLen: {length_str:>8}  │  Eps: {len(self.episode_rewards):<7} ║",
-            f"║  Rollout: {rollout_str:>7}  │  Train: {train_str:>9}  │ {'Running...':<13} ║", 
-            f"╚{'═' * 58}╝",
-        ]
-        
-        # 移动光标并清除下方内容
-        # move_up_lines 应该等于 len(status_lines) - 1 (因为最后print自带一个换行)
-        move_up_lines = len(status_lines) - 1 
-        sys.stdout.write(f"\033[{move_up_lines}A\033[J")
-
-        sys.stdout.write("\n".join(status_lines) + "\n")
-        sys.stdout.flush()
+        print(
+            f"[{bar}] {progress_percent:5.1f}% | "
+            f"steps {steps_done:,}/{self.total_timesteps:,} (total {current_steps:,}) | "
+            f"fps {fps_str} | elapsed {elapsed_str} | eta {eta_str} | "
+            f"reward {reward_str} | ep_len {length_str} | "
+            f"episodes {len(self.episode_rewards)} | "
+            f"rollout {self.last_rollout_dt:.1f}s | train {self.last_train_dt:.1f}s"
+        )
 
     def _format_time(self, seconds: float) -> str:
         if seconds < 0 or seconds > 86400 * 30:
@@ -566,7 +549,7 @@ def create_callbacks(args, cfg, config, env, n_envs):
         total_timesteps=args.timesteps,
         update_freq=config["progress_update_freq"],
         verbose=1,
-        curriculum_threshold=0.8,
+        curriculum_threshold=cfg.training.curriculum_threshold,
     )
     callbacks.append(progress_callback)
 

@@ -54,9 +54,8 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
             raise ValueError("PyBulletPushEnv only supports state observations.")
 
         self.difficulty = 0
-        self.distance_threshold = self.cfg.success_threshold
-        self.orientation_threshold = self.cfg.orientation_threshold
         self.asset_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets"))
+        self.ee_init_pos = self.cfg.ee_initial_pos
         self.fixed_ee_z = self.cfg.fixed_ee_z
         # PushT-style action and reset settings.
         self.step_size = self.cfg.step_size
@@ -102,10 +101,10 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self.step_penalty = self._cfg_value("stepPenalty", "step_penalty", -0.1)
         self.crash_penalty = self._cfg_value("crashPenalty", "crash_penalty", -100.0)
         self.crash_delta_thresh = self._cfg_value("crashDeltaThresh", "crash_delta_thresh", 0.1)
-        self.base_pos_thresh = self._cfg_value("posThresh", "success_threshold", 0.03)
+        self.base_pos_thresh = self.cfg.posThresh
         self.pos_thresh = self.base_pos_thresh
         self.pos_deadzone = self._cfg_value("posDeadzone", "pos_deadzone", 0.06)
-        self.base_ori_thresh = self._cfg_value("oriThresh", "orientation_threshold", 1.0)
+        self.base_ori_thresh = self.cfg.oriThresh
         self.ori_thresh = self.base_ori_thresh
         self.actions = np.zeros(2, dtype=np.float32)
         self.prev_action_world = np.zeros(2, dtype=np.float32)
@@ -380,6 +379,9 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
 
         center_x, center_y = 0., 0.
 
+        p.resetBasePositionAndOrientation(self.eeId, self.ee_init_pos + [0], [0, 0, 0, 1])
+        p.resetBaseVelocity(self.eeId, [0, 0, 0], [0, 0, 0])
+
         # --- 1. 重置物体 (Object) ---
         object_x = center_x + self.np_random.uniform(*self.obj_x_range)
         object_y = center_y + self.np_random.uniform(*self.obj_y_range)
@@ -463,8 +465,6 @@ class PyBulletPushEnv(BasePushEnv, gym.Env):
         self.difficulty = difficulty
         self.pos_thresh = self.base_pos_thresh * (0.97 ** self.difficulty)
         self.ori_thresh = self.base_ori_thresh * (0.97 ** self.difficulty)
-        self.distance_threshold = self.pos_thresh
-        self.orientation_threshold = self.ori_thresh
 
     def _angle_normalize(self, angle):
         """将角度归一化到 [-pi, pi]"""

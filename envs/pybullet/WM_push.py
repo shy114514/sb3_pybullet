@@ -269,25 +269,10 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
         return contact_info
 
     def _reset_object_from_wm_state(self, xt: np.ndarray) -> None:
+        xt[2] = self.fixed_ee_z  # Ensure object stays on the table plane
         next_quat = R.from_rotvec(xt[3:6]).as_quat()
         p.resetBasePositionAndOrientation(self.objectId, xt[0:3].tolist(), next_quat.tolist())
         p.resetBaseVelocity(self.objectId, xt[6:9].tolist(), xt[9:12].tolist())
-
-    def _constrain_to_horizontal_plane(self, xt: np.ndarray) -> np.ndarray:
-        """(Maybe not proper)Keep the mesh T block flat on the table while preserving planar yaw."""
-        xt_constrained = xt.copy()
-
-        xt_constrained[2] = self.t_block_base_z
-
-        yaw = R.from_rotvec(xt[3:6]).as_euler("xyz")[2]
-        constrained_rot = R.from_euler("z", yaw) * R.from_euler("y", np.pi / 2.0)
-        xt_constrained[3:6] = constrained_rot.as_rotvec().astype(np.float32)
-
-        xt_constrained[8] = 0.0
-        xt_constrained[9] = 0.0
-        xt_constrained[10] = 0.0
-
-        return xt_constrained
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
         obs, info = super().reset(seed=seed, options=options)
@@ -312,42 +297,43 @@ class WMPyBulletPushEnv(PyBulletPushEnv):
         obj_heading = self._object_heading_from_quat(obj_orn)
         delta_pos = self._rotate_xy_obj_to_world(action * self.step_size, obj_heading)
         self.prev_action_world[:] = delta_pos
-        target_ee_pos = self.ee_pos.copy()
-        target_ee_pos[:2] += delta_pos
-        ee_delta = target_ee_pos - self.ee_pos
-
-        at = np.zeros(12, dtype=np.float32)
-        at[6:9] = (ee_delta / self.dt).astype(np.float32)
-        at[9:12] = np.zeros(3, dtype=np.float32)
-
         _, ee_orn = p.getBasePositionAndOrientation(self.eeId)
-        p.resetBasePositionAndOrientation(self.eeId, target_ee_pos.tolist(), ee_orn)
-        p.resetBaseVelocity(self.eeId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        target_ee_pos = self.ee_pos.copy()
 
-        p.performCollisionDetection()
-        contact_info, has_contact = self._get_model_contact_info()
+        for alpha in self.smootherstep_alphas:
+            ee_delta = np.zeros(3, dtype=np.float32)
+            ee_delta[:2] = alpha * delta_pos
+            target_ee_pos += ee_delta
 
-        if has_contact:
-            self._wm_xt = _infer_pose(
-                xt=self._wm_xt,
-                at=at,
-                contact_info=contact_info,
-                model_v=self.model_v,
-                model_w=self.model_w,
-                dt=self.dt,
-            )
-            self._reset_object_from_wm_state(self._wm_xt)
+            at = np.zeros(12, dtype=np.float32)
+            at[6:9] = ee_delta / self.dt
 
             p.resetBasePositionAndOrientation(self.eeId, target_ee_pos.tolist(), ee_orn)
             p.resetBaseVelocity(self.eeId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
             p.performCollisionDetection()
 
-            correction_contact_info = self._get_correction_contact_info()
-            self._wm_xt = _correct_pred(self._wm_xt, correction_contact_info)
-            self._reset_object_from_wm_state(self._wm_xt)
-        else:
-            self._wm_xt[6:12] = 0.0
-            p.resetBaseVelocity(self.objectId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+            contact_info, has_contact = self._get_model_contact_info()
+            if has_contact:
+                self._wm_xt = _infer_pose(
+                    xt=self._wm_xt,
+                    at=at,
+                    contact_info=contact_info,
+                    model_v=self.model_v,
+                    model_w=self.model_w,
+                    dt=self.dt,
+                )
+                self._reset_object_from_wm_state(self._wm_xt)
+
+                p.resetBasePositionAndOrientation(self.eeId, target_ee_pos.tolist(), ee_orn)
+                p.resetBaseVelocity(self.eeId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+                p.performCollisionDetection()
+
+                correction_contact_info = self._get_correction_contact_info()
+                self._wm_xt = _correct_pred(self._wm_xt, correction_contact_info)
+                self._reset_object_from_wm_state(self._wm_xt)
+            else:
+                self._wm_xt[6:12] = 0.0
+                p.resetBaseVelocity(self.objectId, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
 
         self.ee_pos = target_ee_pos
 

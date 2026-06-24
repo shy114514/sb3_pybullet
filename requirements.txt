@@ -6,4 +6,4 @@ torch
 pyyaml
 scipy
 matplotlib
-imageio
+imageio[ffmpeg]
